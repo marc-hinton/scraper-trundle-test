@@ -382,3 +382,20 @@ proxy_detected_timeout = 400
 
 # Whether to stop workers when they got detected instead of waiting.
 stop_on_detection = True
+
+"""
+[DISTRIBUTED_ORCHESTRATOR]
+Configuration parameters for distributed worker orchestration and job management.
+"""
+
+# URL of the worker registry service for registering and discovering remote workers
+# Example: 'http://orchestrator.example.com:5000'
+worker_registry_url = ''
+
+# Interval in seconds for worker heartbeat signals to the orchestrator
+# Workers send heartbeats at this interval to indicate they are alive and ready for work
+heartbeat_interval = 30
+
+# Timeout in seconds for job execution before the orchestrator marks a job as failed
+# If a job is not completed within this time, it will be marked as failed and retried
+job_timeout = 3600
