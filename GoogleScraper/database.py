@@ -16,7 +16,7 @@ can be assigned to more than one ScraperSearch. Therefore we need a n:m relation
 
 import datetime
 from urllib.parse import urlparse
-from sqlalchemy import Column, String, Integer, ForeignKey, Table, DateTime, Enum, Boolean
+from sqlalchemy import Column, String, Integer, ForeignKey, Table, DateTime, Enum, Boolean, Index, Float, Text
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import relationship, backref
 from sqlalchemy import create_engine, UniqueConstraint
@@ -236,7 +236,7 @@ class SearchEngine(Base):
 
 class SearchEngineProxyStatus(Base):
     """Stores last proxy status for the given search engine.
-    
+
     A proxy can either work on a search engine or not.
     """
 
@@ -247,6 +247,163 @@ class SearchEngineProxyStatus(Base):
     search_engine_id = Column(Integer, ForeignKey('search_engine.id'))
     available = Column(Boolean)
     last_check = Column(DateTime)
+
+
+class Worker(Base):
+    """Represents a remote worker in the distributed scraping system.
+
+    Tracks worker registration, heartbeats, capabilities, and availability.
+    """
+
+    __tablename__ = 'worker'
+
+    id = Column(Integer, primary_key=True)
+    hostname = Column(String, unique=True, nullable=False)
+    worker_type = Column(Enum('selenium', 'http', 'puppeteer'), nullable=False)
+    registration_time = Column(DateTime, default=datetime.datetime.utcnow)
+    last_heartbeat = Column(DateTime, default=datetime.datetime.utcnow)
+    is_active = Column(Boolean, default=True)
+    concurrent_job_capacity = Column(Integer, default=1)
+
+    # Relationships
+    remote_jobs = relationship('RemoteJob', backref=backref('worker', uselist=False), foreign_keys='RemoteJob.assigned_worker_id')
+    job_assignments = relationship('JobAssignment', backref=backref('worker', uselist=True))
+    capabilities = relationship('WorkerCapability', backref=backref('worker', uselist=True), cascade='all, delete-orphan')
+
+    # Indexes
+    __table_args__ = (
+        Index('idx_worker_last_heartbeat', 'last_heartbeat'),
+        Index('idx_worker_is_active', 'is_active'),
+    )
+
+    def __str__(self):
+        return '<Worker[{id}] {hostname} ({worker_type}) active={is_active}>'.format(**self.__dict__)
+
+    def __repr__(self):
+        return self.__str__()
+
+
+class RemoteJob(Base):
+    """Represents a scrape job to be executed by remote workers.
+
+    Tracks job status, assignments, retries, and configuration.
+    """
+
+    __tablename__ = 'remote_job'
+
+    id = Column(Integer, primary_key=True)
+    keywords = Column(Text, nullable=False)
+    search_engines = Column(String, nullable=False)
+    scrape_method = Column(String, nullable=False)
+    status = Column(Enum('queued', 'running', 'completed', 'failed'), default='queued')
+    created_at = Column(DateTime, default=datetime.datetime.utcnow)
+    assigned_worker_id = Column(Integer, ForeignKey('worker.id'), nullable=True)
+    retries = Column(Integer, default=0)
+    max_retries = Column(Integer, default=3)
+
+    # Relationships
+    job_assignments = relationship('JobAssignment', backref=backref('remote_job', uselist=True), cascade='all, delete-orphan')
+
+    # Indexes
+    __table_args__ = (
+        Index('idx_remote_job_status', 'status'),
+        Index('idx_remote_job_created_at', 'created_at'),
+        Index('idx_remote_job_assigned_worker_id', 'assigned_worker_id'),
+    )
+
+    def __str__(self):
+        return '<RemoteJob[{id}] status={status} keywords={keywords}>'.format(**self.__dict__)
+
+    def __repr__(self):
+        return self.__str__()
+
+
+class JobAssignment(Base):
+    """Tracks the assignment of jobs to workers.
+
+    Records when a job was assigned, started, and completed by a worker.
+    """
+
+    __tablename__ = 'job_assignment'
+
+    id = Column(Integer, primary_key=True)
+    worker_id = Column(Integer, ForeignKey('worker.id'), nullable=False)
+    job_id = Column(Integer, ForeignKey('remote_job.id'), nullable=False)
+    assignment_time = Column(DateTime, default=datetime.datetime.utcnow)
+    start_time = Column(DateTime, nullable=True)
+    completion_time = Column(DateTime, nullable=True)
+
+    # Indexes
+    __table_args__ = (
+        Index('idx_job_assignment_worker_id', 'worker_id'),
+        Index('idx_job_assignment_job_id', 'job_id'),
+        UniqueConstraint('worker_id', 'job_id', name='unique_worker_job_assignment'),
+    )
+
+    def __str__(self):
+        return '<JobAssignment[{id}] worker_id={worker_id} job_id={job_id}>'.format(**self.__dict__)
+
+    def __repr__(self):
+        return self.__str__()
+
+
+class WorkerCapability(Base):
+    """Tracks the capabilities of each worker.
+
+    Records what worker types, search engines, and scrape methods a worker supports.
+    """
+
+    __tablename__ = 'worker_capability'
+
+    id = Column(Integer, primary_key=True)
+    worker_id = Column(Integer, ForeignKey('worker.id'), nullable=False)
+    supported_worker_types = Column(String, nullable=False)  # comma-separated
+    supported_search_engines = Column(String, nullable=False)  # comma-separated
+    supported_scrape_methods = Column(String, nullable=False)  # comma-separated
+    max_concurrent_jobs = Column(Integer, default=1)
+
+    # Indexes
+    __table_args__ = (
+        Index('idx_worker_capability_worker_id', 'worker_id'),
+    )
+
+    def __str__(self):
+        return '<WorkerCapability[{id}] worker_id={worker_id}>'.format(**self.__dict__)
+
+    def __repr__(self):
+        return self.__str__()
+
+
+class ProxyHealthScore(Base):
+    """Tracks real-time health metrics for proxies.
+
+    Records success rate, failure counts, and usage patterns for proxy load balancing.
+    """
+
+    __tablename__ = 'proxy_health_score'
+
+    id = Column(Integer, primary_key=True)
+    proxy_id = Column(Integer, ForeignKey('proxy.id'), nullable=False, unique=True)
+    success_rate = Column(Float, default=1.0)  # 0.0 to 1.0
+    last_used = Column(DateTime, nullable=True)
+    failure_count = Column(Integer, default=0)
+    blocked_count = Column(Integer, default=0)
+    total_requests = Column(Integer, default=0)
+
+    # Relationship
+    proxy = relationship(Proxy, backref=backref('health_score', uselist=False))
+
+    # Indexes
+    __table_args__ = (
+        Index('idx_proxy_health_score_proxy_id', 'proxy_id'),
+        Index('idx_proxy_health_score_success_rate', 'success_rate'),
+    )
+
+    def __str__(self):
+        return '<ProxyHealthScore[{id}] proxy_id={proxy_id} success_rate={success_rate}>'.format(**self.__dict__)
+
+    def __repr__(self):
+        return self.__str__()
 
 
 def get_engine(config, path=None):

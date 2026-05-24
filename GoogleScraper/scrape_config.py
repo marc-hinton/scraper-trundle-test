@@ -382,3 +382,27 @@ proxy_detected_timeout = 400
 
 # Whether to stop workers when they got detected instead of waiting.
 stop_on_detection = True
+
+"""
+[ORCHESTRATOR]
+Settings for distributed worker and job orchestration.
+"""
+
+# URL of the worker registry service
+# Used for worker registration and discovery in distributed mode
+worker_registry_url = ''
+
+# Heartbeat interval in seconds
+# How often remote workers send heartbeats to the orchestrator
+heartbeat_interval = 30
+
+# Job timeout in seconds
+# Maximum time allowed for a job to complete before marking it as failed
+job_timeout = 3600
+
+# Maximum number of retries for a failed job
+max_job_retries = 3
+
+# Enable distributed orchestration mode
+# If False, GoogleScraper operates in standalone mode
+distributed_mode = False
