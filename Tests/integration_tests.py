@@ -2,10 +2,14 @@
 # -*- coding: utf-8 -*-
 
 import os
+import time
+import tempfile
 import unittest
 from GoogleScraper import scrape_with_config
 from GoogleScraper.parsing import get_parser_by_search_engine
 from GoogleScraper.config import get_config
+from GoogleScraper.worker_registry import WorkerRegistry
+from GoogleScraper.database import get_engine, get_session, Worker
 from collections import Counter
 
 config = get_config()
@@ -395,6 +399,242 @@ class GoogleScraperIntegrationTestCase(unittest.TestCase):
                 assert len(serp['link']) > 8
                 assert serp['title']
                 assert len(serp['snippet']) > 5
+
+
+class WorkerRegistryIntegrationTestCase(unittest.TestCase):
+    """Integration tests for worker registry and heartbeat system."""
+
+    def setUp(self):
+        """Set up test database and registry."""
+        # Create a temporary database for testing
+        self.temp_dir = tempfile.mkdtemp()
+        self.db_path = os.path.join(self.temp_dir, 'test_workers.db')
+
+        # Create test config
+        self.test_config = {
+            'database_name': self.db_path.replace('.db', ''),
+            'heartbeat_interval': 1,
+            'heartbeat_timeout': 2,
+            'enable_worker_health_check': True,
+        }
+
+        # Create engine and initialize database
+        self.engine = get_engine(self.test_config, path=self.db_path)
+        self.registry = WorkerRegistry(self.test_config, engine=self.engine)
+
+    def tearDown(self):
+        """Clean up test database and registry."""
+        self.registry.stop_health_check()
+        # Clean up temp files
+        import shutil
+        if os.path.exists(self.temp_dir):
+            shutil.rmtree(self.temp_dir)
+
+    def test_register_worker(self):
+        """Test that workers can be registered."""
+        worker_id = self.registry.register_worker(
+            hostname='worker-1',
+            worker_type='scraper',
+            concurrent_capacity=10
+        )
+
+        self.assertIsNotNone(worker_id)
+        self.assertGreater(worker_id, 0)
+
+        # Verify worker was stored in database
+        session = get_session(self.test_config, engine=self.engine)()
+        worker = session.query(Worker).filter(Worker.id == worker_id).first()
+        session.close()
+
+        self.assertIsNotNone(worker)
+        self.assertEqual(worker.hostname, 'worker-1')
+        self.assertEqual(worker.worker_type, 'scraper')
+        self.assertEqual(worker.concurrent_capacity, 10)
+        self.assertTrue(worker.is_active)
+
+    def test_register_duplicate_worker(self):
+        """Test that registering same hostname twice reactivates worker."""
+        worker_id_1 = self.registry.register_worker(
+            hostname='worker-2',
+            worker_type='scraper',
+            concurrent_capacity=10
+        )
+
+        # Manually mark as inactive
+        session = get_session(self.test_config, engine=self.engine)()
+        worker = session.query(Worker).filter(Worker.id == worker_id_1).first()
+        worker.is_active = False
+        session.commit()
+        session.close()
+
+        # Register again with same hostname
+        worker_id_2 = self.registry.register_worker(
+            hostname='worker-2',
+            worker_type='scraper',
+            concurrent_capacity=10
+        )
+
+        # Should return same ID
+        self.assertEqual(worker_id_1, worker_id_2)
+
+        # Worker should be reactivated
+        session = get_session(self.test_config, engine=self.engine)()
+        worker = session.query(Worker).filter(Worker.id == worker_id_2).first()
+        session.close()
+
+        self.assertTrue(worker.is_active)
+
+    def test_heartbeat_update(self):
+        """Test that heartbeat updates worker metrics."""
+        worker_id = self.registry.register_worker(
+            hostname='worker-3',
+            worker_type='scraper',
+            concurrent_capacity=10
+        )
+
+        # Send heartbeat with metrics
+        result = self.registry.heartbeat(
+            worker_id=worker_id,
+            current_job_count=5,
+            cpu_usage='45.2',
+            memory_usage='62.1'
+        )
+
+        self.assertTrue(result)
+
+        # Verify metrics were updated
+        session = get_session(self.test_config, engine=self.engine)()
+        worker = session.query(Worker).filter(Worker.id == worker_id).first()
+        session.close()
+
+        self.assertEqual(worker.current_job_count, 5)
+        self.assertEqual(worker.cpu_usage, '45.2')
+        self.assertEqual(worker.memory_usage, '62.1')
+
+    def test_heartbeat_unknown_worker(self):
+        """Test that heartbeat with unknown worker_id returns False."""
+        result = self.registry.heartbeat(worker_id=9999)
+        self.assertFalse(result)
+
+    def test_get_all_active_workers(self):
+        """Test retrieving all active workers."""
+        # Register multiple workers
+        worker_id_1 = self.registry.register_worker(
+            hostname='worker-4',
+            worker_type='scraper',
+            concurrent_capacity=10
+        )
+        worker_id_2 = self.registry.register_worker(
+            hostname='worker-5',
+            worker_type='proxy-checker',
+            concurrent_capacity=5
+        )
+
+        # Get all active workers
+        active_workers = self.registry.get_all_active_workers()
+
+        self.assertEqual(len(active_workers), 2)
+        hostnames = [w.hostname for w in active_workers]
+        self.assertIn('worker-4', hostnames)
+        self.assertIn('worker-5', hostnames)
+
+    def test_health_check_marks_stale_workers_inactive(self):
+        """Test that health check marks workers without heartbeat as inactive."""
+        # Register a worker
+        worker_id = self.registry.register_worker(
+            hostname='worker-6',
+            worker_type='scraper',
+            concurrent_capacity=10
+        )
+
+        # Verify worker is active
+        session = get_session(self.test_config, engine=self.engine)()
+        worker = session.query(Worker).filter(Worker.id == worker_id).first()
+        self.assertTrue(worker.is_active)
+        session.close()
+
+        # Wait for health check to run (heartbeat_timeout=2s, interval=1s)
+        # We need to wait longer than timeout for the check to mark it inactive
+        time.sleep(3)
+
+        # Verify worker is marked as inactive
+        session = get_session(self.test_config, engine=self.engine)()
+        worker = session.query(Worker).filter(Worker.id == worker_id).first()
+        session.close()
+
+        self.assertFalse(worker.is_active)
+
+    def test_worker_reactivation_on_heartbeat(self):
+        """Test that worker comes back online when sending heartbeat after being marked inactive."""
+        # Register a worker
+        worker_id = self.registry.register_worker(
+            hostname='worker-7',
+            worker_type='scraper',
+            concurrent_capacity=10
+        )
+
+        # Wait for health check to mark it inactive
+        time.sleep(3)
+
+        # Verify worker is inactive
+        session = get_session(self.test_config, engine=self.engine)()
+        worker = session.query(Worker).filter(Worker.id == worker_id).first()
+        self.assertFalse(worker.is_active)
+        session.close()
+
+        # Send heartbeat
+        result = self.registry.heartbeat(worker_id=worker_id, current_job_count=2)
+        self.assertTrue(result)
+
+        # Verify worker is reactivated
+        session = get_session(self.test_config, engine=self.engine)()
+        worker = session.query(Worker).filter(Worker.id == worker_id).first()
+        session.close()
+
+        self.assertTrue(worker.is_active)
+
+    def test_concurrent_heartbeats(self):
+        """Test that multiple concurrent heartbeats work correctly."""
+        import threading
+
+        # Register multiple workers
+        worker_ids = []
+        for i in range(5):
+            worker_id = self.registry.register_worker(
+                hostname=f'worker-concurrent-{i}',
+                worker_type='scraper',
+                concurrent_capacity=10
+            )
+            worker_ids.append(worker_id)
+
+        # Send heartbeats concurrently
+        def send_heartbeat(worker_id, job_count):
+            self.registry.heartbeat(
+                worker_id=worker_id,
+                current_job_count=job_count,
+                cpu_usage='50.0',
+                memory_usage='60.0'
+            )
+
+        threads = []
+        for i, worker_id in enumerate(worker_ids):
+            t = threading.Thread(target=send_heartbeat, args=(worker_id, i))
+            threads.append(t)
+            t.start()
+
+        # Wait for all threads to complete
+        for t in threads:
+            t.join(timeout=5)
+
+        # Verify all workers are still active and have updated metrics
+        session = get_session(self.test_config, engine=self.engine)()
+        workers = session.query(Worker).filter(Worker.id.in_(worker_ids)).all()
+        session.close()
+
+        self.assertEqual(len(workers), 5)
+        for worker in workers:
+            self.assertTrue(worker.is_active)
+            self.assertGreaterEqual(worker.current_job_count, 0)
 
 
 if __name__ == '__main__':
