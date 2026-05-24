@@ -22,7 +22,11 @@ try:
     from selenium.webdriver.support import expected_conditions as EC  # available since 2.26.0
     from selenium.webdriver.common.desired_capabilities import DesiredCapabilities
     from selenium.webdriver.firefox.options import Options as FirefoxOptions
-    from selenium.webdriver.firefox.firefox_binary import FirefoxBinary
+    try:
+        from selenium.webdriver.firefox.firefox_binary import FirefoxBinary
+    except ImportError:
+        # Selenium 4+ removed FirefoxBinary
+        FirefoxBinary = None
 except ImportError as ie:
     print(ie)
     sys.exit('You can install missing modules with `pip3 install [modulename]`')
@@ -362,10 +366,19 @@ class SelScrape(SearchEngineScrape, threading.Thread):
 
         try:
             bin_path = self.config.get('firefox_binary_path')
-            binary = FirefoxBinary(bin_path)
             geckodriver_path = self.config.get('geckodriver_path')
             options = FirefoxOptions()
-            profile = webdriver.FirefoxProfile()
+
+            # Handle FirefoxBinary for compatibility with older and newer Selenium versions
+            if bin_path and FirefoxBinary:
+                options.binary_location = bin_path
+            elif bin_path and not FirefoxBinary:
+                options.binary_location = bin_path
+
+            try:
+                profile = webdriver.FirefoxProfile()
+            except:
+                profile = None
 
             options.add_argument(
                 'user-agent={}'.format(self.user_agent))
@@ -388,10 +401,23 @@ class SelScrape(SearchEngineScrape, threading.Thread):
                 else:
                     raise ValueError('Invalid protocol given in proxyfile.')
 
+            if profile:
                 profile.update_preferences()
 
-            self.webdriver = webdriver.Firefox(firefox_binary=binary, firefox_options=options,
-                     executable_path=geckodriver_path, firefox_profile=profile)
+            # Handle Selenium 4.x vs older versions
+            try:
+                if profile:
+                    self.webdriver = webdriver.Firefox(options=options,
+                             executable_path=geckodriver_path, firefox_profile=profile)
+                else:
+                    self.webdriver = webdriver.Firefox(options=options,
+                             executable_path=geckodriver_path)
+            except TypeError:
+                # Fallback for Selenium 4.x+
+                if profile:
+                    self.webdriver = webdriver.Firefox(options=options, firefox_profile=profile)
+                else:
+                    self.webdriver = webdriver.Firefox(options=options)
             return True
 
         except WebDriverException as e:

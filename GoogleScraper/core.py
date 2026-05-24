@@ -11,6 +11,7 @@ from GoogleScraper.log import setup_logger
 from GoogleScraper.commandline import get_command_line
 from GoogleScraper.database import ScraperSearch, SERP, Link, get_session, fixtures
 from GoogleScraper.proxies import parse_proxy_file, get_proxies_from_mysql_db, add_proxies_to_db
+from GoogleScraper.proxy_health import ProxyHealthScorer
 from GoogleScraper.caching import CacheManager
 from GoogleScraper.config import get_config
 from GoogleScraper.scrape_jobs import default_scrape_jobs_for_keywords
@@ -345,6 +346,10 @@ def main(return_results=False, parse_cmd_line=True, config_from_dict=None):
 
     # add proxies to the database
     add_proxies_to_db(proxies, session)
+
+    # Initialize proxy health scorer for intelligent proxy rotation
+    proxy_health_scorer = ProxyHealthScorer(session)
+    logger.info('Initialized proxy health scoring system for intelligent proxy rotation')
 
     # ask the user to continue the last scrape. We detect a continuation of a
     # previously established scrape, if the keyword-file is the same and unmodified since
