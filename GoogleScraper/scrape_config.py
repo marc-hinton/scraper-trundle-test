@@ -373,6 +373,20 @@ Settings specific for the asynchronous mode.
 max_concurrent_requests = 100
 
 """
+[PUPPETEER]
+All settings specific for Puppeteer headless browser scraping.
+"""
+
+# Number of browser instances in the pool
+puppeteer_browser_count = 3
+
+# Timeout in milliseconds for Puppeteer operations
+puppeteer_timeout = 30000
+
+# Whether to run Puppeteer in headless mode (no visible window)
+puppeteer_headless_mode = True
+
+"""
 [PROXY_POLICY]
 How the proxy policy works.
 """

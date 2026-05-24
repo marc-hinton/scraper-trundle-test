@@ -15,7 +15,7 @@ import logging
 
 logger = logging.getLogger(__name__)
 
-SEARCH_MODES = ('http', 'selenium', 'http-async')
+SEARCH_MODES = ('http', 'selenium', 'http-async', 'puppeteer')
 
 
 class GoogleSearchError(Exception):
@@ -429,6 +429,7 @@ class SearchEngineScrape(metaclass=abc.ABCMeta):
 
 from GoogleScraper.http_mode import HttpScrape
 from GoogleScraper.selenium_mode import get_selenium_scraper_by_search_engine_name
+from GoogleScraper.puppeteer_mode import PuppeteerScraper
 
 
 class ScrapeWorkerFactory():
@@ -489,6 +490,21 @@ class ScrapeWorkerFactory():
             elif self.mode == 'http':
 
                 return HttpScrape(
+                    self.config,
+                    cache_manager=self.cache_manager,
+                    search_engine=self.search_engine,
+                    jobs=self.jobs,
+                    session=self.session,
+                    scraper_search=self.scraper_search,
+                    cache_lock=self.cache_lock,
+                    db_lock=self.db_lock,
+                    proxy=self.proxy,
+                    progress_queue=self.progress_queue,
+                )
+
+            elif self.mode == 'puppeteer':
+
+                return PuppeteerScraper(
                     self.config,
                     cache_manager=self.cache_manager,
                     search_engine=self.search_engine,
