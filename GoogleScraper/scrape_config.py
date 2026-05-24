@@ -354,6 +354,24 @@ num_tabs = 1
 
 
 """
+[PUPPETEER]
+All settings that apply for headless browser scraping with Puppeteer.
+"""
+
+# Number of browser instances to maintain in the pool
+puppeteer_browser_count = 3
+
+# Timeout for Puppeteer page navigation in seconds
+puppeteer_timeout = 30
+
+# Whether to run Puppeteer in headless mode
+puppeteer_headless_mode = True
+
+# Path to Node.js executable
+node_path = 'node'
+
+
+"""
 [HTTP]
 All settings that target the raw http packet scraping mode.
 """
