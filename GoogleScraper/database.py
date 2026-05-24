@@ -265,6 +265,11 @@ class Worker(Base):
     is_active = Column(Boolean, default=True)
     concurrent_job_capacity = Column(Integer, default=1)
 
+    # Resource utilization metrics
+    current_job_count = Column(Integer, default=0)
+    cpu_usage = Column(Float, default=0.0)
+    memory_usage = Column(Float, default=0.0)
+
     # Relationships
     remote_jobs = relationship('RemoteJob', backref=backref('worker', uselist=False), foreign_keys='RemoteJob.assigned_worker_id')
     job_assignments = relationship('JobAssignment', backref=backref('worker', uselist=True))
@@ -274,6 +279,8 @@ class Worker(Base):
     __table_args__ = (
         Index('idx_worker_last_heartbeat', 'last_heartbeat'),
         Index('idx_worker_is_active', 'is_active'),
+        Index('idx_worker_cpu_usage', 'cpu_usage'),
+        Index('idx_worker_memory_usage', 'memory_usage'),
     )
 
     def __str__(self):

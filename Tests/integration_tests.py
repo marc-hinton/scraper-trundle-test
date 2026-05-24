@@ -505,6 +505,31 @@ class WorkerRegistryTestCase(unittest.TestCase):
         finally:
             session.close()
 
+    def test_heartbeat_updates_resource_metrics(self):
+        """Test that heartbeat updates CPU and memory usage metrics."""
+        worker = self.registry.register_worker('test_worker_1', 'http', 5)
+
+        # Send heartbeat with resource metrics
+        success = self.registry.heartbeat(
+            worker.id,
+            current_job_count=3,
+            cpu_usage=75.5,
+            memory_usage=82.3
+        )
+
+        assert success is True
+
+        # Verify metrics were stored
+        session_factory = get_session(self.test_config)
+        session = session_factory()
+        try:
+            updated_worker = session.query(Worker).filter(Worker.id == worker.id).first()
+            assert updated_worker.current_job_count == 3
+            assert updated_worker.cpu_usage == 75.5
+            assert updated_worker.memory_usage == 82.3
+        finally:
+            session.close()
+
     def test_heartbeat_with_invalid_worker_id(self):
         """Test heartbeat with non-existent worker ID."""
         success = self.registry.heartbeat(99999, current_job_count=2)

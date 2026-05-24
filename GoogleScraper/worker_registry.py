@@ -218,20 +218,20 @@ class WorkerRegistry:
 
     def heartbeat(self, worker_id, current_job_count=0, cpu_usage=0.0, memory_usage=0.0):
         """Update a worker's heartbeat and resource utilization metrics.
-        
+
         This method should be called frequently by workers to indicate they are
         alive and provide current resource usage information. Uses a single UPDATE
         query to minimize database load.
-        
+
         Args:
             worker_id (int): ID of the worker to update
             current_job_count (int): Number of jobs currently running on the worker
             cpu_usage (float): Current CPU usage percentage (0-100)
             memory_usage (float): Current memory usage percentage (0-100)
-            
+
         Returns:
             bool: True if heartbeat was successful, False if worker not found
-            
+
         Raises:
             ValueError: If parameters are invalid
             Exception: On database errors
@@ -259,9 +259,11 @@ class WorkerRegistry:
                     logger.warning(f'Heartbeat received for unknown worker (id={worker_id})')
                     return False
 
+                # Update all metrics in a single operation
                 worker.last_heartbeat = datetime.datetime.utcnow()
-                # Note: We could extend the Worker model to store cpu_usage and memory_usage
-                # For now, we just update the heartbeat timestamp
+                worker.current_job_count = current_job_count
+                worker.cpu_usage = cpu_usage
+                worker.memory_usage = memory_usage
                 session.commit()
 
                 logger.debug(
