@@ -17,6 +17,7 @@ from GoogleScraper.scrape_jobs import default_scrape_jobs_for_keywords
 from GoogleScraper.scraping import ScrapeWorkerFactory
 from GoogleScraper.output_converter import init_outfile
 from GoogleScraper.async_mode import AsyncScrapeScheduler
+from GoogleScraper.proxy_health import ProxyHealthScorer
 import logging
 from GoogleScraper.utils import get_base_path
 import GoogleScraper.config
@@ -345,6 +346,13 @@ def main(return_results=False, parse_cmd_line=True, config_from_dict=None):
 
     # add proxies to the database
     add_proxies_to_db(proxies, session)
+
+    # Initialize proxy health scorer for real-time proxy health tracking
+    proxy_health_scorer = ProxyHealthScorer(
+        time_window_hours=config.get('proxy_health_time_window_hours', 24),
+        ema_alpha=config.get('proxy_health_ema_alpha', 0.3)
+    )
+    logger.info('ProxyHealthScorer initialized for real-time proxy health tracking')
 
     # ask the user to continue the last scrape. We detect a continuation of a
     # previously established scrape, if the keyword-file is the same and unmodified since
