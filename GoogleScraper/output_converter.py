@@ -16,7 +16,12 @@ impossible to launch lang scrape jobs with millions of keywords.
 
 output_format = 'stdout'
 outfile = sys.stdout
-csv_fieldnames = sorted(set(Link.__table__.columns._data.keys() + SERP.__table__.columns._data.keys()) - {'id', 'serp_id'})
+# Fix for SQLAlchemy 2.0 compatibility: Use .keys() instead of ._data.keys()
+try:
+    csv_fieldnames = sorted(set(Link.__table__.columns.keys() + SERP.__table__.columns.keys()) - {'id', 'serp_id'})
+except TypeError:
+    # In case keys() returns a view object in Python 3, convert to list
+    csv_fieldnames = sorted(set(list(Link.__table__.columns.keys()) + list(SERP.__table__.columns.keys())) - {'id', 'serp_id'})
 
 logger = logging.getLogger(__name__)
 
