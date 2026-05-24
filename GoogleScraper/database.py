@@ -236,7 +236,7 @@ class SearchEngine(Base):
 
 class SearchEngineProxyStatus(Base):
     """Stores last proxy status for the given search engine.
-    
+
     A proxy can either work on a search engine or not.
     """
 
@@ -247,6 +247,34 @@ class SearchEngineProxyStatus(Base):
     search_engine_id = Column(Integer, ForeignKey('search_engine.id'))
     available = Column(Boolean)
     last_check = Column(DateTime)
+
+
+class Worker(Base):
+    """Represents a remote worker that processes scraping jobs.
+
+    Workers register themselves, send periodic heartbeats to indicate they are alive,
+    and report their current resource utilization (CPU, memory, concurrent job slots).
+    """
+
+    __tablename__ = 'worker'
+
+    id = Column(Integer, primary_key=True)
+    hostname = Column(String, unique=True, nullable=False)
+    worker_type = Column(String, nullable=False)
+    concurrent_capacity = Column(Integer, nullable=False)
+    is_active = Column(Boolean, default=True)
+    last_heartbeat = Column(DateTime, default=datetime.datetime.utcnow)
+    current_job_count = Column(Integer, default=0)
+    cpu_usage = Column(String, default='0')  # Store as string percentage (e.g., "45.2")
+    memory_usage = Column(String, default='0')  # Store as string percentage (e.g., "62.1")
+    created_at = Column(DateTime, default=datetime.datetime.utcnow)
+
+    def __str__(self):
+        return '<Worker[{id}] hostname={hostname} type={worker_type} active={is_active} jobs={current_job_count}/{concurrent_capacity}>'.format(
+            **self.__dict__)
+
+    def __repr__(self):
+        return self.__str__()
 
 
 def get_engine(config, path=None):

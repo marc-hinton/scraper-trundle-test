@@ -382,3 +382,17 @@ proxy_detected_timeout = 400
 
 # Whether to stop workers when they got detected instead of waiting.
 stop_on_detection = True
+
+"""
+[WORKER_REGISTRY]
+Settings for the worker registration and health check system.
+"""
+
+# Heartbeat interval in seconds. Workers should send heartbeats at this interval.
+heartbeat_interval = 30
+
+# Heartbeat timeout in seconds. Workers without a heartbeat for this duration are marked inactive.
+heartbeat_timeout = 120
+
+# Whether to enable worker registry background health check process
+enable_worker_health_check = True
