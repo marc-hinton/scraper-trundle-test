@@ -1,0 +1,12 @@
+{
+  "name": "googlescraper-puppeteer",
+  "version": "1.0.0",
+  "description": "Puppeteer scraper for GoogleScraper",
+  "main": "scraper.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "dependencies": {
+    "puppeteer": "^20.0.0"
+  }
+}
