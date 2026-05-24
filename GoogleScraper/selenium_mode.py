@@ -22,7 +22,11 @@ try:
     from selenium.webdriver.support import expected_conditions as EC  # available since 2.26.0
     from selenium.webdriver.common.desired_capabilities import DesiredCapabilities
     from selenium.webdriver.firefox.options import Options as FirefoxOptions
-    from selenium.webdriver.firefox.firefox_binary import FirefoxBinary
+    try:
+        from selenium.webdriver.firefox.firefox_binary import FirefoxBinary
+    except ImportError:
+        # Newer Selenium versions don't have FirefoxBinary
+        FirefoxBinary = None
 except ImportError as ie:
     print(ie)
     sys.exit('You can install missing modules with `pip3 install [modulename]`')
@@ -362,7 +366,6 @@ class SelScrape(SearchEngineScrape, threading.Thread):
 
         try:
             bin_path = self.config.get('firefox_binary_path')
-            binary = FirefoxBinary(bin_path)
             geckodriver_path = self.config.get('geckodriver_path')
             options = FirefoxOptions()
             profile = webdriver.FirefoxProfile()
@@ -390,8 +393,16 @@ class SelScrape(SearchEngineScrape, threading.Thread):
 
                 profile.update_preferences()
 
-            self.webdriver = webdriver.Firefox(firefox_binary=binary, firefox_options=options,
-                     executable_path=geckodriver_path, firefox_profile=profile)
+            # Build kwargs for Firefox webdriver
+            kwargs = {'firefox_options': options, 'firefox_profile': profile}
+            if geckodriver_path:
+                kwargs['executable_path'] = geckodriver_path
+
+            # Only set firefox_binary if it's available and a path is configured
+            if FirefoxBinary and bin_path:
+                kwargs['firefox_binary'] = FirefoxBinary(bin_path)
+
+            self.webdriver = webdriver.Firefox(**kwargs)
             return True
 
         except WebDriverException as e:

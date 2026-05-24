@@ -3,9 +3,14 @@
 
 import os
 import unittest
+import time
+import datetime
+import threading
 from GoogleScraper import scrape_with_config
 from GoogleScraper.parsing import get_parser_by_search_engine
 from GoogleScraper.config import get_config
+from GoogleScraper.database import get_session, Worker
+from GoogleScraper.worker_registry import WorkerRegistry
 from collections import Counter
 
 config = get_config()
@@ -395,6 +400,279 @@ class GoogleScraperIntegrationTestCase(unittest.TestCase):
                 assert len(serp['link']) > 8
                 assert serp['title']
                 assert len(serp['snippet']) > 5
+
+
+class WorkerRegistryTestCase(unittest.TestCase):
+    """Test cases for the worker registry and heartbeat health monitoring system."""
+
+    def setUp(self):
+        """Set up test fixtures."""
+        self.config = get_config()
+        # Create a test-specific config with short timeouts
+        self.test_config = self.config.copy()
+        self.test_config['heartbeat_interval'] = 1
+        self.test_config['heartbeat_timeout'] = 2
+        self.test_config['database_name'] = 'test_worker_registry'
+        self.registry = WorkerRegistry(self.test_config)
+
+        # Clean up any existing workers
+        self._cleanup_test_workers()
+
+    def tearDown(self):
+        """Clean up after tests."""
+        self.registry.stop_health_check()
+        self._cleanup_test_workers()
+
+    def _cleanup_test_workers(self):
+        """Clean up test workers from the database."""
+        try:
+            session_factory = get_session(self.test_config)
+            session = session_factory()
+            try:
+                session.query(Worker).filter(
+                    Worker.hostname.in_(['test_worker_1', 'test_worker_2', 'test_worker_3'])
+                ).delete()
+                session.commit()
+            finally:
+                session.close()
+        except Exception:
+            pass
+
+    def test_worker_registration(self):
+        """Test basic worker registration."""
+        worker = self.registry.register_worker('test_worker_1', 'http', 5)
+
+        assert worker is not None
+        assert worker.hostname == 'test_worker_1'
+        assert worker.worker_type == 'http'
+        assert worker.concurrent_job_capacity == 5
+        assert worker.is_active is True
+        assert worker.id is not None
+
+    def test_worker_registration_with_invalid_hostname(self):
+        """Test worker registration fails with invalid hostname."""
+        with self.assertRaises(ValueError):
+            self.registry.register_worker('', 'http', 5)
+
+    def test_worker_registration_with_invalid_type(self):
+        """Test worker registration fails with invalid worker type."""
+        with self.assertRaises(ValueError):
+            self.registry.register_worker('test_worker_1', 'invalid_type', 5)
+
+    def test_worker_registration_with_invalid_capacity(self):
+        """Test worker registration fails with invalid capacity."""
+        with self.assertRaises(ValueError):
+            self.registry.register_worker('test_worker_1', 'http', 0)
+
+    def test_worker_re_registration(self):
+        """Test that re-registering a worker marks it as active."""
+        # Register first time
+        worker1 = self.registry.register_worker('test_worker_1', 'http', 5)
+        worker1_id = worker1.id
+
+        # Mark as inactive manually
+        session_factory = get_session(self.test_config)
+        session = session_factory()
+        try:
+            worker = session.query(Worker).filter(Worker.id == worker1_id).first()
+            worker.is_active = False
+            session.commit()
+        finally:
+            session.close()
+
+        # Re-register
+        worker2 = self.registry.register_worker('test_worker_1', 'http', 5)
+        assert worker2.id == worker1_id
+        assert worker2.is_active is True
+
+    def test_heartbeat_updates_timestamp(self):
+        """Test that heartbeat updates the last_heartbeat timestamp."""
+        worker = self.registry.register_worker('test_worker_1', 'http', 5)
+        original_heartbeat = worker.last_heartbeat
+
+        # Wait a bit and send heartbeat
+        time.sleep(0.1)
+        success = self.registry.heartbeat(worker.id, current_job_count=2, cpu_usage=50.0, memory_usage=60.0)
+
+        assert success is True
+
+        # Verify heartbeat was updated
+        session_factory = get_session(self.test_config)
+        session = session_factory()
+        try:
+            updated_worker = session.query(Worker).filter(Worker.id == worker.id).first()
+            assert updated_worker.last_heartbeat > original_heartbeat
+        finally:
+            session.close()
+
+    def test_heartbeat_updates_resource_metrics(self):
+        """Test that heartbeat updates CPU and memory usage metrics."""
+        worker = self.registry.register_worker('test_worker_1', 'http', 5)
+
+        # Send heartbeat with resource metrics
+        success = self.registry.heartbeat(
+            worker.id,
+            current_job_count=3,
+            cpu_usage=75.5,
+            memory_usage=82.3
+        )
+
+        assert success is True
+
+        # Verify metrics were stored
+        session_factory = get_session(self.test_config)
+        session = session_factory()
+        try:
+            updated_worker = session.query(Worker).filter(Worker.id == worker.id).first()
+            assert updated_worker.current_job_count == 3
+            assert updated_worker.cpu_usage == 75.5
+            assert updated_worker.memory_usage == 82.3
+        finally:
+            session.close()
+
+    def test_heartbeat_with_invalid_worker_id(self):
+        """Test heartbeat with non-existent worker ID."""
+        success = self.registry.heartbeat(99999, current_job_count=2)
+        assert success is False
+
+    def test_heartbeat_with_invalid_cpu_usage(self):
+        """Test heartbeat fails with invalid CPU usage."""
+        worker = self.registry.register_worker('test_worker_1', 'http', 5)
+        with self.assertRaises(ValueError):
+            self.registry.heartbeat(worker.id, cpu_usage=150.0)
+
+    def test_heartbeat_with_invalid_memory_usage(self):
+        """Test heartbeat fails with invalid memory usage."""
+        worker = self.registry.register_worker('test_worker_1', 'http', 5)
+        with self.assertRaises(ValueError):
+            self.registry.heartbeat(worker.id, memory_usage=-10.0)
+
+    def test_health_check_marks_inactive(self):
+        """Test that health check marks workers as inactive after timeout."""
+        # Register a worker
+        worker = self.registry.register_worker('test_worker_1', 'http', 5)
+        assert worker.is_active is True
+
+        # Manually set last_heartbeat to past
+        session_factory = get_session(self.test_config)
+        session = session_factory()
+        try:
+            w = session.query(Worker).filter(Worker.id == worker.id).first()
+            w.last_heartbeat = datetime.datetime.utcnow() - datetime.timedelta(seconds=5)
+            session.commit()
+        finally:
+            session.close()
+
+        # Run health check
+        inactive_count = self.registry.perform_health_check()
+        assert inactive_count == 1
+
+        # Verify worker is now inactive
+        session_factory = get_session(self.test_config)
+        session = session_factory()
+        try:
+            w = session.query(Worker).filter(Worker.id == worker.id).first()
+            assert w.is_active is False
+        finally:
+            session.close()
+
+    def test_health_check_keeps_active_workers(self):
+        """Test that health check keeps recently active workers marked as active."""
+        worker = self.registry.register_worker('test_worker_1', 'http', 5)
+
+        # Send a heartbeat
+        self.registry.heartbeat(worker.id)
+
+        # Run health check
+        inactive_count = self.registry.perform_health_check()
+        assert inactive_count == 0
+
+        # Verify worker is still active
+        session_factory = get_session(self.test_config)
+        session = session_factory()
+        try:
+            w = session.query(Worker).filter(Worker.id == worker.id).first()
+            assert w.is_active is True
+        finally:
+            session.close()
+
+    def test_concurrent_heartbeats(self):
+        """Test that concurrent heartbeats from same worker are handled gracefully."""
+        worker = self.registry.register_worker('test_worker_1', 'http', 5)
+
+        # Send multiple heartbeats concurrently
+        results = []
+        def send_heartbeat():
+            success = self.registry.heartbeat(worker.id)
+            results.append(success)
+
+        threads = [threading.Thread(target=send_heartbeat) for _ in range(5)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        # All should succeed
+        assert all(results)
+        assert len(results) == 5
+
+    def test_get_active_workers(self):
+        """Test retrieving list of active workers."""
+        # Register multiple workers
+        w1 = self.registry.register_worker('test_worker_1', 'http', 5)
+        w2 = self.registry.register_worker('test_worker_2', 'selenium', 3)
+
+        # Both should be in active list
+        active = self.registry.get_active_workers()
+        assert len(active) >= 2
+        hostnames = [w.hostname for w in active]
+        assert 'test_worker_1' in hostnames
+        assert 'test_worker_2' in hostnames
+
+    def test_get_worker_by_id(self):
+        """Test retrieving worker by ID."""
+        worker = self.registry.register_worker('test_worker_1', 'http', 5)
+
+        retrieved = self.registry.get_worker_by_id(worker.id)
+        assert retrieved is not None
+        assert retrieved.hostname == 'test_worker_1'
+
+    def test_get_worker_by_hostname(self):
+        """Test retrieving worker by hostname."""
+        worker = self.registry.register_worker('test_worker_1', 'http', 5)
+
+        retrieved = self.registry.get_worker_by_hostname('test_worker_1')
+        assert retrieved is not None
+        assert retrieved.id == worker.id
+
+    def test_health_check_thread(self):
+        """Test that health check thread runs in background."""
+        self.registry.start_health_check()
+
+        # Register a worker
+        worker = self.registry.register_worker('test_worker_1', 'http', 5)
+
+        # Manually make it stale
+        session_factory = get_session(self.test_config)
+        session = session_factory()
+        try:
+            w = session.query(Worker).filter(Worker.id == worker.id).first()
+            w.last_heartbeat = datetime.datetime.utcnow() - datetime.timedelta(seconds=10)
+            session.commit()
+        finally:
+            session.close()
+
+        # Wait for health check to run
+        time.sleep(2)
+
+        # Worker should now be marked inactive
+        session_factory = get_session(self.test_config)
+        session = session_factory()
+        try:
+            w = session.query(Worker).filter(Worker.id == worker.id).first()
+            assert w.is_active is False
+        finally:
+            session.close()
 
 
 if __name__ == '__main__':
