@@ -396,6 +396,10 @@ worker_registry_url = ''
 # How often remote workers send heartbeats to the orchestrator
 heartbeat_interval = 30
 
+# Heartbeat timeout in seconds
+# After how long without a heartbeat should a worker be marked as inactive
+heartbeat_timeout = 120
+
 # Job timeout in seconds
 # Maximum time allowed for a job to complete before marking it as failed
 job_timeout = 3600
