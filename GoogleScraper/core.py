@@ -473,5 +473,23 @@ def main(return_results=False, parse_cmd_line=True, config_from_dict=None):
     session.add(scraper_search)
     session.commit()
 
+    output_format = config.get('output_format')
+    if output_format in ('json', 'csv'):
+        from GoogleScraper.output_converter import row2dict
+        from GoogleScraper.output_formats import to_json, to_csv
+
+        results = []
+        for serp in scraper_search.serps:
+            serp_dict = row2dict(serp)
+            for link in serp.links:
+                row = dict(serp_dict)
+                row.update(row2dict(link))
+                results.append(row)
+
+        if output_format == 'json':
+            print(to_json(results))
+        elif output_format == 'csv':
+            print(to_csv(results))
+
     if return_results:
         return scraper_search

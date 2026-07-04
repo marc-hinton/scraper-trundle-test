@@ -125,6 +125,13 @@ NOTSET = 0
                         help="A mysql connection string for proxies to use. Format: mysql://<username>:<password>@"
                              "<host>/<dbname>. Has precedence over proxy files.")
 
+    parser.add_argument('--output-format', dest='output_format', type=str, action='store', default=None,
+                        choices=('json', 'csv'),
+                        help='Serialise the collected results and print them to stdout in the given format after '
+                             'scraping has finished. Supported values are "json" and "csv". If this option is '
+                             'omitted, the previous behaviour (writing to --output-filename or printing results as '
+                             'they arrive) is preserved.')
+
     parser.add_argument('-s', '--search-engines', action='store', default=['google'],
                         help='What search engines to use (See GoogleScraper --config for the all supported). If you '
                              'want to use more than one at the same time, just separate with commatas: "google, bing, '
