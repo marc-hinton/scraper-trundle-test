@@ -122,15 +122,41 @@ class CompressedFile(object):
 
 
 
-class CacheManager():
+class CacheBackend(object):
     """
-    Manages caching for GoogleScraper.
+    Abstract interface for a cache storage backend.
+
+    A cache backend is responsible for storing and retrieving raw cached
+    values (typically the HTML of a SERP page) by a unique key. Concrete
+    backends decide *how* and *where* the data is stored (on disk, in
+    memory, in a database, ...), while the :class:`CacheManager` decides
+    *what* is stored (i.e. it computes the keys and the values).
+    """
+
+    def get(self, key):
+        """Return the cached value for `key` or None if nothing is cached."""
+        raise NotImplementedError
+
+    def set(self, key, value):
+        """Store `value` under `key`."""
+        raise NotImplementedError
+
+    def clear(self):
+        """Remove all entries that are stored in this backend."""
+        raise NotImplementedError
+
+
+class FileCacheBackend(CacheBackend):
+    """
+    Cache backend that stores every cached value in a separate file
+    on disk. This is the historical (and default) behaviour of
+    GoogleScraper: every SERP page is cached in its own (optionally
+    compressed) file inside the configured cache directory.
     """
 
     def __init__(self, config):
         self.config = config
         self.maybe_create_cache_dir()
-
 
     def maybe_create_cache_dir(self):
         if self.config.get('do_caching', True):
@@ -138,6 +164,60 @@ class CacheManager():
             if not os.path.exists(cd):
                 os.mkdir(cd)
 
+    def get(self, key):
+        """Return the contents of the cache file identified by `key`.
+
+        Returns None if there is no such file or if it is considered
+        stale (older than `clean_cache_after` hours).
+        """
+        cachedir = self.config.get('cachedir', '.scrapecache')
+
+        if key in os.listdir(cachedir):
+            try:
+                modtime = os.path.getmtime(os.path.join(cachedir, key))
+            except FileNotFoundError:
+                return None
+
+            if (time.time() - modtime) / 60 / 60 > int(self.config.get('clean_cache_after', 48)):
+                return None
+
+            path = os.path.join(cachedir, key)
+            return self.read_cached_file(path)
+        else:
+            return None
+
+    def set(self, key, value):
+        """Write `value` to the cache file identified by `key`.
+
+        If `compress_cached_files` is set in the configuration, the value
+        is written using the configured compression algorithm.
+        """
+        cachedir = self.config.get('cachedir', '.scrapecache')
+        path = os.path.join(cachedir, key)
+
+        if self.config.get('compress_cached_files'):
+            algorithm = self.config.get('compressing_algorithm', 'gz')
+            f = CompressedFile(path, algorithm=algorithm)
+            f.write(value)
+        else:
+            with open(path, 'w') as fd:
+                if isinstance(value, bytes):
+                    fd.write(value.decode())
+                else:
+                    fd.write(value)
+
+    def clear(self):
+        """Remove every cached file from the cache directory."""
+        cachedir = self.config.get('cachedir', '.scrapecache')
+        if os.path.exists(cachedir):
+            for fname in os.listdir(cachedir):
+                path = os.path.join(cachedir, fname)
+                if os.path.isdir(path):
+                    import shutil
+
+                    shutil.rmtree(path)
+                else:
+                    os.remove(path)
 
     def maybe_clean_cache(self):
         """
@@ -158,6 +238,112 @@ class CacheManager():
                         shutil.rmtree(path)
                     else:
                         os.remove(os.path.join(cachedir, fname))
+
+    def read_cached_file(self, path):
+        """Read a compressed or uncompressed file.
+
+        The compressing schema is determined by the file extension. For example
+        a file that ends with .gz needs to be gunzipped.
+
+        Supported algorithms:
+        gzip and bzip2
+
+        Args:
+            path: The path to the cached file.
+
+        Returns:
+            The data of the cached file as a string.
+
+        Raises:
+            InvalidConfigurationFileException: When the type of the cached file
+                cannot be determined.
+        """
+        ext = path.split('.')[-1]
+
+        # The path needs to have an extension in any case.
+        # When uncompressed, ext is 'cache', else it is the
+        # compressing scheme file ending like .gz or .bz2 ...
+        assert ext in ALLOWED_COMPRESSION_ALGORITHMS or ext == 'cache', 'Invalid extension: {}'.format(ext)
+
+        if ext == 'cache':
+            with open(path, 'r') as fd:
+                try:
+                    data = fd.read()
+                    return data
+                except UnicodeDecodeError as e:
+                    logger.warning(str(e))
+                    # If we get this error, the cache files are probably
+                    # compressed but the 'compress_cached_files' flag was
+                    # set to False. Try to decompress them, but this may
+                    # lead to a infinite recursion. This isn't proper coding,
+                    # but convenient for the end user.
+                    self.config['compress_cached_files'] = True
+        elif ext in ALLOWED_COMPRESSION_ALGORITHMS:
+            f = CompressedFile(path)
+            return f.read()
+        else:
+            raise InvalidConfigurationFileException('"{}" is a invalid configuration file.'.format(path))
+
+
+class MemoryCacheBackend(CacheBackend):
+    """
+    Cache backend that keeps every cached value in a plain
+    in-memory dictionary. Useful for testing or short lived scrape
+    jobs where persisting the cache to disk is not required. Data
+    stored in this backend does not survive the current process.
+    """
+
+    def __init__(self, config=None):
+        self.config = config or {}
+        self._store = {}
+
+    def get(self, key):
+        return self._store.get(key, None)
+
+    def set(self, key, value):
+        self._store[key] = value
+
+    def clear(self):
+        self._store.clear()
+
+
+CACHE_BACKENDS = {
+    'file': FileCacheBackend,
+    'memory': MemoryCacheBackend,
+}
+
+
+class CacheManager():
+    """
+    Manages caching for GoogleScraper.
+
+    The actual storage/retrieval of cached data is delegated to a
+    :class:`CacheBackend` instance. Which backend is used may be
+    controlled with the `cache_backend` configuration option
+    (`'file'` or `'memory'`). The file backend is used by default,
+    keeping the historical behaviour of GoogleScraper unchanged.
+    """
+
+    def __init__(self, config, backend=None):
+        self.config = config
+
+        if backend is not None:
+            self.backend = backend
+        else:
+            backend_name = self.config.get('cache_backend', 'file')
+            backend_cls = CACHE_BACKENDS.get(backend_name, FileCacheBackend)
+            self.backend = backend_cls(config)
+
+
+    def maybe_clean_cache(self):
+        """
+        Clean the cache.
+
+        Clean all cached searches (the obtained html code) in the cache directory iff
+        the respective files are older than specified in the configuration. Defaults to 12 hours.
+        """
+        if hasattr(self.backend, 'maybe_clean_cache'):
+            self.backend.maybe_clean_cache()
 
 
     def cached_file_name(self, keyword, search_engine, scrape_mode, page_number):
@@ -199,38 +385,21 @@ class CacheManager():
 
         Returns:
             The contents of the HTML that was shipped while searching. False if there couldn't
-            be found a file based on the above params.
+            be found a cached value based on the above params.
 
         """
         if self.config.get('do_caching', False):
             fname = self.cached_file_name(keyword, search_engine, scrapemode, page_number)
-
-            cdir = self.config.get('cachedir', '.scrapecache')
-
-            if fname in os.listdir(cdir):
-                # If the cached file is older than 12 hours, return False and thus
-                # make a new fresh request.
-                try:
-                    modtime = os.path.getmtime(os.path.join(cdir, fname))
-                except FileNotFoundError:
-                    return False
-
-                if (time.time() - modtime) / 60 / 60 > int(self.config('clean_cache_after', 48)):
-                    return False
-
-                path = os.path.join(cdir, fname)
-                return self.read_cached_file(path)
-            else:
-                return False
+            value = self.backend.get(fname)
+            return value if value is not None else False
 
     def read_cached_file(self, path):
-        """Read a compressed or uncompressed file.
+        """Read a compressed or uncompressed cache file directly from disk.
 
-        The compressing schema is determined by the file extension. For example
-        a file that ends with .gz needs to be gunzipped.
-
-        Supported algorithms:
-        gzip and bzip2
+        This is only meaningful when the file backend is used and is kept
+        around because some callers need to read a cache file by path
+        rather than by its computed cache key (e.g. when walking the cache
+        directory directly).
 
         Args:
             path: The path to the cached file.
@@ -243,31 +412,7 @@ class CacheManager():
                 cannot be determined.
         """
         if self.config.get('do_caching', False):
-            ext = path.split('.')[-1]
-
-            # The path needs to have an extension in any case.
-            # When uncompressed, ext is 'cache', else it is the
-            # compressing scheme file ending like .gz or .bz2 ...
-            assert ext in ALLOWED_COMPRESSION_ALGORITHMS or ext == 'cache', 'Invalid extension: {}'.format(ext)
-
-            if ext == 'cache':
-                with open(path, 'r') as fd:
-                    try:
-                        data = fd.read()
-                        return data
-                    except UnicodeDecodeError as e:
-                        logger.warning(str(e))
-                        # If we get this error, the cache files are probably
-                        # compressed but the 'compress_cached_files' flag was
-                        # set to False. Try to decompress them, but this may
-                        # lead to a infinite recursion. This isn't proper coding,
-                        # but convenient for the end user.
-                        self.config['compress_cached_files'] = True
-            elif ext in ALLOWED_COMPRESSION_ALGORITHMS:
-                f = CompressedFile(path)
-                return f.read()
-            else:
-                raise InvalidConfigurationFileException('"{}" is a invalid configuration file.'.format(path))
+            return self.backend.read_cached_file(path)
 
 
     def cache_results(self, parser, query, search_engine, scrape_mode, page_number, db_lock=None):
@@ -298,22 +443,15 @@ class CacheManager():
                 html = parser.html
 
             fname = self.cached_file_name(query, search_engine, scrape_mode, page_number)
-            cachedir = self.config.get('cachedir', '.scrapecache')
-            path = os.path.join(cachedir, fname)
-
-            if self.config.get('compress_cached_files'):
-                algorithm = self.config.get('compressing_algorithm', 'gz')
-                f = CompressedFile(path, algorithm=algorithm)
-                f.write(html)
-            else:
-                with open(path, 'w') as fd:
-                    if isinstance(html, bytes):
-                        fd.write(html.decode())
-                    else:
-                        fd.write(html)
+            self.backend.set(fname, html)
 
             if db_lock:
                 db_lock.release()
+
+
+    def clear_cache(self):
+        """Remove every entry that is currently held by the cache backend."""
+        self.backend.clear()
 
 
     def _get_all_cache_files(self):
