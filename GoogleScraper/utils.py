@@ -1,4 +1,9 @@
 # -*- coding: utf-8 -*-
+"""Utility helper functions for GoogleScraper.
+
+This module provides helper functions for data chunking, word retrieval from various sources,
+and path utilities used throughout the GoogleScraper package.
+"""
 
 from itertools import zip_longest
 import re
