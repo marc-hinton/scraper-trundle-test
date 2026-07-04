@@ -1,153 +1,134 @@
+# -*- coding: utf-8 -*-
+"""Async scraping entry point.
+
+This module used to embed a synchronous scrape/parse/cache loop
+directly.  It has been refactored to delegate all of the heavy
+lifting to :mod:`GoogleScraper.pipeline`, keeping only the
+integration glue that ties the pipeline to the rest of
+GoogleScraper (cache manager, database session, output converter).
+"""
+
+from __future__ import annotations
+
 import asyncio
-import aiohttp
 import datetime
-from urllib.parse import urlencode
-from GoogleScraper.parsing import get_parser_by_search_engine, parse_serp
-from GoogleScraper.http_mode import get_GET_params_for_search_engine, headers
-from GoogleScraper.scraping import get_base_search_url_by_search_engine
-from GoogleScraper.utils import get_some_words
-from GoogleScraper.output_converter import store_serp_result
 import logging
+from typing import Any, Callable, Dict, Iterable, List, Optional
+
+from GoogleScraper.parsing import parse_serp
+from GoogleScraper.output_converter import store_serp_result
+from GoogleScraper.pipeline import (
+    PipelineCoordinator,
+    ParsedResult,
+    StorageStage,
+    plugin_registry,
+)
 
 logger = logging.getLogger(__name__)
 
-class AsyncHttpScrape(object):
-    """Scrape asynchronously using asyncio.
 
-    https://aiohttp.readthedocs.io/en/v3.0.1/client.html
+class _IntegratedStorage(StorageStage):
+    """Storage stage that talks to cache/db/output converter."""
 
-    Some search engines don't block after a certain amount of requests.
-    Google surely does (after very few parallel requests).
-    But with bing or example, it's now (18.01.2015) no problem to
-    scrape 100 unique pages in 3 seconds.
-    """
-
-    def __init__(self, config, query='', page_number=1, search_engine='google', scrape_method='http-async'):
-        """
-        """
+    def __init__(self, in_queue, config, cache_manager=None, session=None,
+                 scraper_search=None, db_lock=None, worker_count: int = 1):
+        super().__init__(in_queue, worker_count=worker_count)
         self.config = config
-        self.query = query
-        self.page_number = page_number
-        self.search_engine_name = search_engine
-        self.search_type = 'normal'
-        self.scrape_method = scrape_method
-        self.requested_at = None
-        self.requested_by = 'localhost'
-        self.parser = get_parser_by_search_engine(self.search_engine_name)
-        self.base_search_url = get_base_search_url_by_search_engine(self.config, self.search_engine_name, 'http')
-        self.params = get_GET_params_for_search_engine(self.query, self.search_engine_name,
-                                                       search_type=self.search_type)
-        self.headers = headers
-        self.status = 'successful'
-
-    async def __call__(self):
-
-        url = self.base_search_url + urlencode(self.params)
-
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url, params=self.params, headers=self.headers) as response:
-
-                if response.status != 200:
-                    self.status = 'not successful: ' + str(response.status)
-
-                self.requested_at = datetime.datetime.utcnow()
-
-                logger.info('[+] {} requested keyword \'{}\' on {}. Response status: {}'.format(
-                    self.requested_by,
-                    self.query,
-                    self.search_engine_name,
-                    response.status))
-
-                logger.debug('[i] URL: {} HEADERS: {}'.format(
-                    url,
-                    self.headers))
-
-                if response.status == 200:
-                    body = await response.text()
-                    self.parser = self.parser(config=self.config, html=body)
-                    return self
-
-            return None
-
-        return request
-
-
-class AsyncScrapeScheduler(object):
-    """
-    Processes the single requests in an asynchronous way.
-    """
-
-    def __init__(self, config, scrape_jobs, cache_manager=None, session=None, scraper_search=None, db_lock=None):
         self.cache_manager = cache_manager
-        self.config = config
-        self.max_concurrent_requests = self.config.get('max_concurrent_requests')
-        self.scrape_jobs = scrape_jobs
         self.session = session
         self.scraper_search = scraper_search
         self.db_lock = db_lock
 
-        self.loop = asyncio.get_event_loop()
-        self.requests = []
-        self.results = []
+    async def store(self, item: ParsedResult) -> None:
+        fetch = item.fetch
+        parser = item.parser
+        job = fetch.job
+        query = job.get('query', '')
+        engine = job.get('search_engine') or fetch.plugin.name
+        scrape_method = job.get('scrape_method', 'http-async')
+        page_number = job.get('page_number', 1)
 
-    def get_requests(self):
+        # Build a lightweight scraper stand-in with the attributes
+        # ``parse_serp`` and downstream helpers expect.
+        scraper = type('AsyncScrape', (), {})()
+        scraper.query = query
+        scraper.search_engine_name = engine
+        scraper.scrape_method = scrape_method
+        scraper.page_number = page_number
+        scraper.requested_at = fetch.requested_at
+        scraper.requested_by = 'localhost'
+        scraper.status = ('successful' if fetch.status == 200
+                          else 'not successful: {}'.format(fetch.status))
+        scraper.parser = parser
 
-        self.requests = []
-        request_number = 0
-
-        while True:
-            request_number += 1
+        if self.cache_manager:
             try:
-                job = self.scrape_jobs.pop()
-            except IndexError:
-                break
+                self.cache_manager.cache_results(
+                    parser, query, engine, scrape_method, page_number)
+            except Exception:  # pragma: no cover
+                logger.exception('Cache write failed')
 
-            if job:
-                self.requests.append(AsyncHttpScrape(self.config, **job))
+        try:
+            serp = parse_serp(self.config, parser=parser,
+                              scraper=scraper, query=query)
+        except Exception:  # pragma: no cover
+            logger.exception('parse_serp failed')
+            return
 
-            if request_number >= self.max_concurrent_requests:
-                break
+        if self.scraper_search is not None:
+            self.scraper_search.serps.append(serp)
 
-    def run(self):
+        if self.session is not None:
+            def _persist():
+                self.session.add(serp)
+                self.session.commit()
+            if self.db_lock is not None:
+                with self.db_lock:
+                    _persist()
+            else:
+                _persist()
 
-        while True:
-            self.get_requests()
-
-            if not self.requests:
-                break
-
-            self.results = self.loop.run_until_complete(asyncio.wait([r() for r in self.requests]))
-
-            for task in self.results[0]:
-                scrape = task.result()
-
-                if scrape:
-
-                    if self.cache_manager:
-                        self.cache_manager.cache_results(scrape.parser, scrape.query, scrape.search_engine_name, scrape.scrape_method,
-                                      scrape.page_number)
-
-                    if scrape.parser:
-                        serp = parse_serp(self.config, parser=scrape.parser, scraper=scrape, query=scrape.query)
-
-                        if self.scraper_search:
-                            self.scraper_search.serps.append(serp)
-
-                        if self.session:
-                            self.session.add(serp)
-                            self.session.commit()
-
-                        store_serp_result(serp, self.config)
+        try:
+            store_serp_result(serp, self.config)
+        except Exception:  # pragma: no cover
+            logger.exception('store_serp_result failed')
 
 
-if __name__ == '__main__':
-    from GoogleScraper.config import get_config
-    from GoogleScraper.scrape_jobs import default_scrape_jobs_for_keywords
+class AsyncScrapeScheduler(object):
+    """Backwards-compatible async scheduler backed by the plugin pipeline.
 
-    some_words = get_some_words(n=1)
+    The public API (``run``) matches the historical scheduler so that
+    :mod:`GoogleScraper.core` keeps working without changes.
+    """
 
-    cfg = get_config()
-    scrape_jobs = list(default_scrape_jobs_for_keywords(some_words, ['bing'], 'http-async', 1))
+    def __init__(self, config: Dict[str, Any],
+                 scrape_jobs: Iterable[Dict[str, Any]],
+                 cache_manager=None, session=None,
+                 scraper_search=None, db_lock=None) -> None:
+        self.config = config
+        # Materialise the iterable so we can feed it multiple times.
+        self.scrape_jobs: List[Dict[str, Any]] = list(scrape_jobs)
+        self.cache_manager = cache_manager
+        self.session = session
+        self.scraper_search = scraper_search
+        self.db_lock = db_lock
 
-    manager = AsyncScrapeScheduler(cfg, scrape_jobs)
-    manager.run()
+        self.coordinator = PipelineCoordinator(
+            config=config, registry=plugin_registry,
+        )
+        # Swap in the integrated storage stage.
+        self.coordinator.storage = _IntegratedStorage(
+            self.coordinator.store_queue,
+            config=config,
+            cache_manager=cache_manager,
+            session=session,
+            scraper_search=scraper_search,
+            db_lock=db_lock,
+            worker_count=self.coordinator.storage_workers,
+        )
+
+    def run(self) -> None:
+        self.coordinator.run(self.scrape_jobs)
+
+
+__all__ = ['AsyncScrapeScheduler']
