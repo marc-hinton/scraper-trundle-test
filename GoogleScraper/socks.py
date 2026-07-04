@@ -56,9 +56,13 @@ __version__ = "1.5.1"
 
 import socket
 import struct
+import base64
 from errno import EOPNOTSUPP, EINVAL, EAGAIN
 from io import BytesIO, SEEK_CUR
-from collections import Callable
+try:
+    from collections.abc import Callable
+except ImportError:
+    from collections import Callable
 
 PROXY_TYPE_SOCKS4 = SOCKS4 = 1
 PROXY_TYPE_SOCKS5 = SOCKS5 = 2
@@ -569,8 +573,22 @@ class socksocket(_BaseSocket):
         # If we need to resolve locally, we do this now
         addr = dest_addr if rdns else socket.gethostbyname(dest_addr)
 
-        self.sendall(b"CONNECT " + addr.encode() + b":" + str(dest_port).encode() +
-                     b" HTTP/1.1\r\n" + b"Host: " + dest_addr.encode() + b"\r\n\r\n")
+        request = (b"CONNECT " + addr.encode() + b":" + str(dest_port).encode() +
+                   b" HTTP/1.1\r\n" + b"Host: " + dest_addr.encode() + b"\r\n")
+
+        # Attach a Proxy-Authorization header when credentials for the
+        # upstream HTTP proxy have been supplied (read from the scrape
+        # config, e.g. a proxy file or the proxy database).
+        if username and password:
+            creds = username.encode() if isinstance(username, str) else username
+            creds += b":"
+            creds += password.encode() if isinstance(password, str) else password
+            encoded_creds = base64.b64encode(creds)
+            request += b"Proxy-Authorization: Basic " + encoded_creds + b"\r\n"
+
+        request += b"\r\n"
+
+        self.sendall(request)
 
         # We just need the first line to check if the connection was successful
         fobj = self.makefile()
